@@ -1989,6 +1989,33 @@ void test6()
     assume_buffer(&tree, "Hello, World!");
 }
 
+void test7()
+{
+    TreeBuilder builder;
+    std::string buf;
+    builder.accept("ABC");
+    builder.accept("DEF");
+    auto tree = builder.create();
+
+    tree.insert(CharOffset{ 0 }, "foo");
+
+    assume_buffer(&tree, "fooABCDEF");
+
+    tree.remove(CharOffset{ 6 }, Length{ 3 });
+
+    assume_buffer(&tree, "fooABC");
+
+    tree.get_line_content(&buf, Line{ 1 });
+
+    assert(buf == "fooABC");
+
+    for (char c : buf)
+    {
+        printf("%c", c);
+    }
+    printf("\n");
+}
+
 int main()
 {
     test1();
@@ -1997,4 +2024,5 @@ int main()
     test4();
     test5();
     test6();
+    test7();
 }
