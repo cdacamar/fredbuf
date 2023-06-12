@@ -145,6 +145,7 @@ namespace PieceTree
         };
 
         ShrinkResult shrink_piece(const Piece& piece, const BufferCursor& first, const BufferCursor& last);
+        void combine_pieces(NodePosition existing, Piece new_piece);
         void remove_node_range(NodePosition first, Length length);
         const CharBuffer* buffer_at(BufferIndex index) const;
         void compute_buffer_meta();

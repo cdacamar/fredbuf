@@ -1144,6 +1144,20 @@ namespace PieceTree
         return { .left = left, .right = right };
     }
 
+    void Tree::combine_pieces(NodePosition existing, Piece new_piece)
+    {
+        // This transformation is only valid under the following conditions.
+        assert(existing.node->piece.index == BufferIndex::ModBuf);
+        // This assumes that the piece was just built.
+        assert(existing.node->piece.last == new_piece.first);
+        auto old_piece = existing.node->piece;
+        new_piece.first = old_piece.first;
+        new_piece.newline_count = new_piece.newline_count + old_piece.newline_count;
+        new_piece.length = new_piece.length + old_piece.length;
+        root = root.remove(existing.start_offset)
+                    .insert({ new_piece }, existing.start_offset);
+    }
+
     void Tree::remove_node_range(NodePosition first, Length length)
     {
         // Remove pieces until we reach the desired length.
@@ -1218,6 +1232,25 @@ namespace PieceTree
         // Case #1.
         if (node_start_offset == offset)
         {
+            // There's a bonus case here.  If our last insertion point was the same as this piece's
+            // last and it inserted into the mod buffer, then we can simply 'extend' this piece by
+            // the following process:
+            // 1. Fetch the previous node (if we can) and compare.
+            // 2. Build the new piece.
+            // 3. Remove the old piece.
+            // 4. Extend the old piece's length to the length of the newly created piece.
+            // 5. Re-insert the new piece.
+            if (offset != CharOffset{})
+            {
+                auto prev_node_result = node_at(retract(offset));
+                if (prev_node_result.node->piece.index == BufferIndex::ModBuf
+                    and prev_node_result.node->piece.last == last_insert)
+                {
+                    auto new_piece = build_piece(txt);
+                    combine_pieces(prev_node_result, new_piece);
+                    return;
+                }
+            }
             auto piece = build_piece(txt);
             root = root.insert({ piece }, offset);
             return;
@@ -1228,6 +1261,19 @@ namespace PieceTree
         // Case #2.
         if (not inside_node)
         {
+            // There's a bonus case here.  If our last insertion point was the same as this piece's
+            // last and it inserted into the mod buffer, then we can simply 'extend' this piece by
+            // the following process:
+            // 1. Build the new piece.
+            // 2. Remove the old piece.
+            // 3. Extend the old piece's length to the length of the newly created piece.
+            // 4. Re-insert the new piece.
+            if (node->piece.index == BufferIndex::ModBuf and node->piece.last == last_insert)
+            {
+                auto new_piece = build_piece(txt);
+                combine_pieces(result, new_piece);
+                return;
+            }
             auto piece = build_piece(txt);
             root = root.insert({ piece }, offset);
             return;

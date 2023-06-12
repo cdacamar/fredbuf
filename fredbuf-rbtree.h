@@ -39,6 +39,8 @@ namespace PieceTree
         Line line = { };
         // Column into the current line.
         Column column = { };
+
+        bool operator==(const BufferCursor&) const = default;
     };
 
     struct Piece
