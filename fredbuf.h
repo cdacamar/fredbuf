@@ -54,6 +54,15 @@ namespace PieceTree
 
     using Buffers = std::vector<BufferReference>;
 
+    struct BufferCollection
+    {
+        const CharBuffer* buffer_at(BufferIndex index) const;
+        CharOffset buffer_offset(BufferIndex index, const BufferCursor& cursor) const;
+
+        Buffers orig_buffers;
+        CharBuffer mod_buffer;
+    };
+
     struct LineRange
     {
         CharOffset first;
@@ -69,8 +78,18 @@ namespace PieceTree
     // Should only be used to uniquely identify a given tree.
     using RootIdentity = const void*;
 
-    struct Tree
+    // Owning snapshot owns its own buffer data (performs a lightweight copy) so
+    // that even if the original tree is destroyed, the owning snapshot can still
+    // reference the underlying text.
+    class OwningSnapshot;
+
+    // Reference snapshot owns no data and is only valid for as long as the original
+    // tree buffers are valid.
+    class ReferenceSnapshot;
+
+    class Tree
     {
+    public:
         explicit Tree();
         explicit Tree(Buffers&& buffers);
 
@@ -113,30 +132,33 @@ namespace PieceTree
         {
             return Length{ rep(line_feed_count()) + 1 };
         }
+
+        OwningSnapshot owning_snap() const;
+        ReferenceSnapshot ref_snap() const;
     private:
         friend class TreeWalker;
+        friend class OwningSnapshot;
+        friend class ReferenceSnapshot;
 #ifdef TEXTBUF_DEBUG
         friend void print_piece(const Piece& piece, const Tree* tree, int level);
         friend void print_tree(const Tree& tree);
 #endif // TEXTBUF_DEBUG
 
-        using Accumulator = Length(Tree::*)(const Piece&, Line) const;
+        using Accumulator = Length(*)(const BufferCollection*, const Piece&, Line);
 
         template <Accumulator accumulate>
-        void line_start(CharOffset* offset, const PieceTree::RedBlackTree& node, Line line) const;
-        void line_end_crlf(CharOffset* offset, const PieceTree::RedBlackTree& node, Line line) const;
-        Length accumulate_value(const Piece& piece, Line index) const;
-        Length accumulate_value_no_lf(const Piece& piece, Line index) const;
-        CharOffset buffer_offset(BufferIndex index, const BufferCursor& cursor) const;
-        void populate_from_node(std::string* buf, const PieceTree::RedBlackTree& node) const;
-        void populate_from_node(std::string* buf, const PieceTree::RedBlackTree& node, Line line_index) const;
-        void assemble_line(std::string* buf, const PieceTree::RedBlackTree& node, Line line) const;
-        LFCount line_feed_count(BufferIndex index, const BufferCursor& start, const BufferCursor& end);
-        Piece build_piece(std::string_view txt);
-        NodePosition node_at(CharOffset off) const;
-        BufferCursor buffer_position(const Piece& piece, Length remainder) const;
-        Piece trim_piece_right(const Piece& piece, const BufferCursor& pos);
-        Piece trim_piece_left(const Piece& piece, const BufferCursor& pos);
+        static void line_start(CharOffset* offset, const BufferCollection* buffers, const RedBlackTree& node, Line line);
+        static void line_end_crlf(CharOffset* offset, const BufferCollection* buffers, const RedBlackTree& root, const RedBlackTree& node, Line line);
+        static Length accumulate_value(const BufferCollection* buffers, const Piece& piece, Line index);
+        static Length accumulate_value_no_lf(const BufferCollection* buffers, const Piece& piece, Line index);
+        static void populate_from_node(std::string* buf, const BufferCollection* buffers, const RedBlackTree& node);
+        static void populate_from_node(std::string* buf, const BufferCollection* buffers, const RedBlackTree& node, Line line_index);
+        static LFCount line_feed_count(const BufferCollection* buffers, BufferIndex index, const BufferCursor& start, const BufferCursor& end);
+        static NodePosition node_at(const BufferCollection* buffers, RedBlackTree node, CharOffset off);
+        static BufferCursor buffer_position(const BufferCollection* buffers, const Piece& piece, Length remainder);
+        static char char_at(const BufferCollection* buffers, const RedBlackTree& node, CharOffset offset);
+        static Piece trim_piece_right(const BufferCollection* buffers, const Piece& piece, const BufferCursor& pos);
+        static Piece trim_piece_left(const BufferCollection* buffers, const Piece& piece, const BufferCursor& pos);
 
         struct ShrinkResult
         {
@@ -144,10 +166,13 @@ namespace PieceTree
             Piece right;
         };
 
-        ShrinkResult shrink_piece(const Piece& piece, const BufferCursor& first, const BufferCursor& last);
-        void combine_pieces(NodePosition existing, Piece new_piece);
+        static ShrinkResult shrink_piece(const BufferCollection* buffers, const Piece& piece, const BufferCursor& first, const BufferCursor& last);
+
+        // Direct mutations.
+        void assemble_line(std::string* buf, const RedBlackTree& node, Line line) const;
+        Piece build_piece(std::string_view txt);
+        void combine_pieces(NodePosition existing_piece, Piece new_piece);
         void remove_node_range(NodePosition first, Length length);
-        const CharBuffer* buffer_at(BufferIndex index) const;
         void compute_buffer_meta();
         void append_undo(const RedBlackTree& old_root, CharOffset op_offset);
 
@@ -157,8 +182,9 @@ namespace PieceTree
             Length total_content_length = { };
         };
 
-        Buffers buffers;
-        CharBuffer mod_buffer;
+        BufferCollection buffers;
+        //Buffers buffers;
+        //CharBuffer mod_buffer;
         PieceTree::RedBlackTree root;
         LineStarts scratch_starts;
         BufferCursor last_insert;
@@ -167,6 +193,41 @@ namespace PieceTree
         BufferMeta meta;
         UndoStack undo_stack;
         RedoStack redo_stack;
+    };
+
+    class OwningSnapshot
+    {
+    public:
+        explicit OwningSnapshot(const Tree* tree);
+
+        // Queries.
+        void get_line_content(std::string* buf, Line line) const;
+        void get_line_content_crlf(std::string* buf, Line line) const;
+    private:
+        friend class TreeWalker;
+
+        RedBlackTree root;
+        Tree::BufferMeta meta;
+        // This should be fairly lightweight.  The original buffers
+        // will retain the majority of the memory consumption.
+        BufferCollection buffers;
+    };
+
+    class ReferenceSnapshot
+    {
+    public:
+        explicit ReferenceSnapshot(const Tree* tree);
+
+        // Queries.
+        void get_line_content(std::string* buf, Line line) const;
+        void get_line_content_crlf(std::string* buf, Line line) const;
+    private:
+        friend class TreeWalker;
+
+        RedBlackTree root;
+        Tree::BufferMeta meta;
+        // A reference to the underlying tree buffers.
+        const BufferCollection* buffers;
     };
 
     struct TreeBuilder
@@ -186,6 +247,8 @@ namespace PieceTree
     {
     public:
         TreeWalker(const Tree* tree, CharOffset offset = CharOffset{ });
+        TreeWalker(const OwningSnapshot* snap, CharOffset offset = CharOffset{ });
+        TreeWalker(const ReferenceSnapshot* snap, CharOffset offset = CharOffset{ });
         TreeWalker(const TreeWalker&) = delete;
 
         char current();
@@ -220,7 +283,9 @@ namespace PieceTree
             Direction dir = Direction::Left;
         };
 
-        const Tree* tree;
+        const BufferCollection* buffers;
+        RedBlackTree root;
+        Tree::BufferMeta meta;
         std::vector<StackEntry> stack;
         CharOffset total_offset = CharOffset{ 0 };
         const char* first_ptr = nullptr;
@@ -243,4 +308,14 @@ namespace PieceTree
     {
         return walker.exhausted();
     }
+
+    enum class EmptySelection : bool { No, Yes };
+
+    struct SelectionMeta
+    {
+        OwningSnapshot snap;
+        Offset first;
+        Offset last;
+        EmptySelection empty;
+    };
 } // namespace PieceTree
