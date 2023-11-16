@@ -1286,12 +1286,13 @@ namespace PieceTree
         }
     }
 
-    void Tree::insert(CharOffset offset, std::string_view txt)
+    void Tree::insert(CharOffset offset, std::string_view txt, SuppressHistory suppress_history)
     {
         if (txt.empty())
             return;
         // This allows us to undo blocks of code.
-        if (end_last_insert != offset or root.is_empty())
+        if (is_no(suppress_history)
+            and (end_last_insert != offset or root.is_empty()))
         {
             append_undo(root, offset);
         }
@@ -1409,12 +1410,15 @@ namespace PieceTree
         root = root.insert({ new_piece_right }, node_start_offset);
     }
 
-    void Tree::remove(CharOffset offset, Length count)
+    void Tree::remove(CharOffset offset, Length count, SuppressHistory suppress_history)
     {
         // Rule out the obvious noop.
         if (rep(count) == 0 or root.is_empty())
             return;
-        append_undo(root, offset);
+        if (is_no(suppress_history))
+        {
+            append_undo(root, offset);
+        }
         ScopeGuard guard{ [&] {
             compute_buffer_meta();
 #ifdef TEXTBUF_DEBUG
@@ -1545,6 +1549,12 @@ namespace PieceTree
         redo_stack.pop_front();
         compute_buffer_meta();
         return { .success = true, .op_offset = redo_offset };
+    }
+
+    // Direct history manipulation.
+    void Tree::commit_head(CharOffset offset)
+    {
+        append_undo(root, offset);
     }
 
 #ifdef TEXTBUF_DEBUG
@@ -2226,6 +2236,52 @@ void test7()
     printf("\n");
 }
 
+void test8()
+{
+    TreeBuilder builder;
+    std::string buf;
+    builder.accept("Hello, World!");
+    auto tree = builder.create();
+
+    tree.insert(CharOffset{ 0 }, "a", PieceTree::SuppressHistory::Yes);
+    assume_buffer(&tree, "aHello, World!");
+
+    auto r = tree.try_undo(CharOffset{ 0 });
+    assert(not r.success);
+
+    tree.remove(CharOffset{ 0 }, Length{ 1 }, PieceTree::SuppressHistory::Yes);
+    assume_buffer(&tree, "Hello, World!");
+
+    r = tree.try_undo(CharOffset{ 0 });
+    assert(not r.success);
+
+    // Snap back to "Hello, World!"
+    tree.commit_head(CharOffset{ 0 });
+    tree.insert(CharOffset{ 0 }, "a", PieceTree::SuppressHistory::Yes);
+    tree.insert(CharOffset{ 1 }, "b", PieceTree::SuppressHistory::Yes);
+    tree.insert(CharOffset{ 2 }, "c", PieceTree::SuppressHistory::Yes);
+    assume_buffer(&tree, "abcHello, World!");
+
+    r = tree.try_undo(CharOffset{ 0 });
+    assert(r.success);
+    assume_buffer(&tree, "Hello, World!");
+
+    // Snap back to "Hello, World!"
+    tree.commit_head(CharOffset{ 0 });
+    tree.remove(CharOffset{ 0 }, Length{ 7 }, PieceTree::SuppressHistory::Yes);
+    assume_buffer(&tree, "World!");
+
+    tree.remove(CharOffset{ 5 }, Length{ 1 }, PieceTree::SuppressHistory::Yes);
+    assume_buffer(&tree, "World");
+
+    r = tree.try_undo(CharOffset{ 0 });
+    assert(r.success);
+    assume_buffer(&tree, "Hello, World!");
+
+    r = tree.try_redo(CharOffset{ 0 });
+    assume_buffer(&tree, "World");
+}
+
 int main()
 {
     test1();
@@ -2235,4 +2291,5 @@ int main()
     test5();
     test6();
     test7();
+    test8();
 }

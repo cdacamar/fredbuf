@@ -87,6 +87,10 @@ namespace PieceTree
     // tree buffers are valid.
     class ReferenceSnapshot;
 
+    // When mutating the tree nodes are saved by default into the undo stack.  This
+    // allows callers to suppress this behavior.
+    enum class SuppressHistory : bool { No, Yes };
+
     class Tree
     {
     public:
@@ -98,10 +102,14 @@ namespace PieceTree
         void build_tree();
 
         // Manipulation.
-        void insert(CharOffset offset, std::string_view txt);
-        void remove(CharOffset offset, Length count);
+        void insert(CharOffset offset, std::string_view txt, SuppressHistory suppress_history = SuppressHistory::No);
+        void remove(CharOffset offset, Length count, SuppressHistory suppress_history = SuppressHistory::No);
         UndoRedoResult try_undo(CharOffset op_offset);
         UndoRedoResult try_redo(CharOffset op_offset);
+
+        // Direct history manipulation.
+        // This will commit the current node to the history.  The offset provided will be the undo point later.
+        void commit_head(CharOffset offset);
 
         // Queries.
         void get_line_content(std::string* buf, Line line) const;

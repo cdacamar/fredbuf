@@ -8,7 +8,7 @@
             "name": "Debug textbuf",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceRoot}/textbuf.exe",
+            "program": "${workspaceRoot}/fredbuf.exe",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceRoot}",

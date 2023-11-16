@@ -55,7 +55,7 @@ constexpr bool is_yes(E e)
 template <YesNoEnum E>
 constexpr bool is_no(E e)
 {
-    return rep(e);
+    return not rep(e);
 }
 
 template <YesNoEnum T>
