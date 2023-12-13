@@ -75,9 +75,6 @@ namespace PieceTree
         CharOffset op_offset;
     };
 
-    // Should only be used to uniquely identify a given tree.
-    using RootIdentity = const void*;
-
     // Owning snapshot owns its own buffer data (performs a lightweight copy) so
     // that even if the original tree is destroyed, the owning snapshot can still
     // reference the underlying text.
@@ -90,6 +87,12 @@ namespace PieceTree
     // When mutating the tree nodes are saved by default into the undo stack.  This
     // allows callers to suppress this behavior.
     enum class SuppressHistory : bool { No, Yes };
+
+    struct BufferMeta
+    {
+        LFCount lf_count = { };
+        Length total_content_length = { };
+    };
 
     class Tree
     {
@@ -110,6 +113,10 @@ namespace PieceTree
         // Direct history manipulation.
         // This will commit the current node to the history.  The offset provided will be the undo point later.
         void commit_head(CharOffset offset);
+        RedBlackTree head() const;
+        // Snaps the tree back to the specified root.  This needs to be called with a root that is derived from
+        // the set of buffers based on its creation.
+        void snap_to(const RedBlackTree& new_root);
 
         // Queries.
         void get_line_content(std::string* buf, Line line) const;
@@ -119,7 +126,6 @@ namespace PieceTree
         LineRange get_line_range(Line line) const;
         LineRange get_line_range_crlf(Line line) const;
         LineRange get_line_range_with_newline(Line line) const;
-        RootIdentity root_identity() const;
 
         Length length() const
         {
@@ -151,6 +157,8 @@ namespace PieceTree
         friend void print_piece(const Piece& piece, const Tree* tree, int level);
         friend void print_tree(const Tree& tree);
 #endif // TEXTBUF_DEBUG
+        void internal_insert(CharOffset offset, std::string_view txt);
+        void internal_remove(CharOffset offset, Length count);
 
         using Accumulator = Length(*)(const BufferCollection*, const Piece&, Line);
 
@@ -184,12 +192,6 @@ namespace PieceTree
         void compute_buffer_meta();
         void append_undo(const RedBlackTree& old_root, CharOffset op_offset);
 
-        struct BufferMeta
-        {
-            LFCount lf_count = { };
-            Length total_content_length = { };
-        };
-
         BufferCollection buffers;
         //Buffers buffers;
         //CharBuffer mod_buffer;
@@ -207,15 +209,20 @@ namespace PieceTree
     {
     public:
         explicit OwningSnapshot(const Tree* tree);
+        explicit OwningSnapshot(const Tree* tree, const RedBlackTree& dt);
 
         // Queries.
         void get_line_content(std::string* buf, Line line) const;
         void get_line_content_crlf(std::string* buf, Line line) const;
+        Length line_count() const
+        {
+            return Length{ rep(meta.lf_count) + 1 };
+        }
     private:
         friend class TreeWalker;
 
         RedBlackTree root;
-        Tree::BufferMeta meta;
+        BufferMeta meta;
         // This should be fairly lightweight.  The original buffers
         // will retain the majority of the memory consumption.
         BufferCollection buffers;
@@ -225,15 +232,20 @@ namespace PieceTree
     {
     public:
         explicit ReferenceSnapshot(const Tree* tree);
+        explicit ReferenceSnapshot(const Tree* tree, const RedBlackTree& dt);
 
         // Queries.
         void get_line_content(std::string* buf, Line line) const;
         void get_line_content_crlf(std::string* buf, Line line) const;
+        Length line_count() const
+        {
+            return Length{ rep(meta.lf_count) + 1 };
+        }
     private:
         friend class TreeWalker;
 
         RedBlackTree root;
-        Tree::BufferMeta meta;
+        BufferMeta meta;
         // A reference to the underlying tree buffers.
         const BufferCollection* buffers;
     };
@@ -293,7 +305,7 @@ namespace PieceTree
 
         const BufferCollection* buffers;
         RedBlackTree root;
-        Tree::BufferMeta meta;
+        BufferMeta meta;
         std::vector<StackEntry> stack;
         CharOffset total_offset = CharOffset{ 0 };
         const char* first_ptr = nullptr;

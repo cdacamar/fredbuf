@@ -111,6 +111,9 @@ namespace PieceTree
         RedBlackTree right() const;
         Color root_color() const;
 
+        // Helpers.
+        bool operator==(const RedBlackTree&) const = default;
+
         // Mutators.
         RedBlackTree insert(const NodeData& x, Offset at) const;
         RedBlackTree remove(Offset at) const;

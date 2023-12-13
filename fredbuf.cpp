@@ -596,6 +596,12 @@ namespace PieceTree
                 }
             }
         }
+
+        void compute_buffer_meta(BufferMeta* meta, const RedBlackTree& root)
+        {
+            meta->lf_count = tree_lf_count(root);
+            meta->total_content_length = tree_length(root);
+        }
     } // namespace [anon]
 
     const CharBuffer* BufferCollection::buffer_at(BufferIndex index) const
@@ -656,6 +662,218 @@ namespace PieceTree
         }
 
         compute_buffer_meta();
+    }
+
+    void Tree::internal_insert(CharOffset offset, std::string_view txt)
+    {
+        assert(not txt.empty());
+        end_last_insert = extend(offset, txt.size());
+        ScopeGuard guard{ [&] {
+            compute_buffer_meta();
+#ifdef TEXTBUF_DEBUG
+            satisfies_rb_invariants(root);
+#endif // TEXTBUF_DEBUG
+        } };
+        if (root.is_empty())
+        {
+            auto piece = build_piece(txt);
+            root = root.insert({ piece }, CharOffset{ 0 });
+            return;
+        }
+
+        auto result = node_at(&buffers, root, offset);
+        // If the offset is beyond the buffer, just select the last node.
+        if (result.node == nullptr)
+        {
+            auto off = CharOffset{ 0 };
+            if (meta.total_content_length != Length{})
+            {
+                off = off + retract(meta.total_content_length);
+            }
+            result = node_at(&buffers, root, off);
+        }
+
+        // There are 3 cases:
+        // 1. We are inserting at the beginning of an existing node.
+        // 2. We are inserting at the end of an existing node.
+        // 3. We are inserting in the middle of the node.
+        auto [node, remainder, node_start_offset, line] = result;
+        assert(node != nullptr);
+        auto insert_pos = buffer_position(&buffers, node->piece, remainder);
+        // Case #1.
+        if (node_start_offset == offset)
+        {
+            // There's a bonus case here.  If our last insertion point was the same as this piece's
+            // last and it inserted into the mod buffer, then we can simply 'extend' this piece by
+            // the following process:
+            // 1. Fetch the previous node (if we can) and compare.
+            // 2. Build the new piece.
+            // 3. Remove the old piece.
+            // 4. Extend the old piece's length to the length of the newly created piece.
+            // 5. Re-insert the new piece.
+            if (offset != CharOffset{})
+            {
+                auto prev_node_result = node_at(&buffers, root, retract(offset));
+                if (prev_node_result.node->piece.index == BufferIndex::ModBuf
+                    and prev_node_result.node->piece.last == last_insert)
+                {
+                    auto new_piece = build_piece(txt);
+                    combine_pieces(prev_node_result, new_piece);
+                    return;
+                }
+            }
+            auto piece = build_piece(txt);
+            root = root.insert({ piece }, offset);
+            return;
+        }
+
+        const bool inside_node = offset < node_start_offset + node->piece.length;
+
+        // Case #2.
+        if (not inside_node)
+        {
+            // There's a bonus case here.  If our last insertion point was the same as this piece's
+            // last and it inserted into the mod buffer, then we can simply 'extend' this piece by
+            // the following process:
+            // 1. Build the new piece.
+            // 2. Remove the old piece.
+            // 3. Extend the old piece's length to the length of the newly created piece.
+            // 4. Re-insert the new piece.
+            if (node->piece.index == BufferIndex::ModBuf and node->piece.last == last_insert)
+            {
+                auto new_piece = build_piece(txt);
+                combine_pieces(result, new_piece);
+                return;
+            }
+            // Insert the new piece at the end.
+            auto piece = build_piece(txt);
+            root = root.insert({ piece }, offset);
+            return;
+        }
+
+        // Case #3.
+        // The basic approach here is to split the existing node into two pieces
+        // and insert the new piece in between them.
+        auto new_len_right = distance(buffers.buffer_offset(node->piece.index, insert_pos),
+                                        buffers.buffer_offset(node->piece.index, node->piece.last));
+        auto new_piece_right = node->piece;
+        new_piece_right.first = insert_pos;
+        new_piece_right.length = new_len_right;
+        new_piece_right.newline_count = line_feed_count(&buffers, node->piece.index, insert_pos, node->piece.last);
+
+        // Remove the original node tail.
+        auto new_piece_left = trim_piece_right(&buffers, node->piece, insert_pos);
+
+        auto new_piece = build_piece(txt);
+
+        // Remove the original node.
+        root = root.remove(node_start_offset);
+
+        // Insert the left.
+        root = root.insert({ new_piece_left }, node_start_offset);
+
+        // Insert the new mid.
+        node_start_offset = node_start_offset + new_piece_left.length;
+        root = root.insert({ new_piece }, node_start_offset);
+
+        // Insert remainder.
+        node_start_offset = node_start_offset + new_piece.length;
+        root = root.insert({ new_piece_right }, node_start_offset);
+    }
+
+    void Tree::internal_remove(CharOffset offset, Length count)
+    {
+        assert(rep(count) != 0 and not root.is_empty());
+        ScopeGuard guard{ [&] {
+            compute_buffer_meta();
+#ifdef TEXTBUF_DEBUG
+            satisfies_rb_invariants(root);
+#endif // TEXTBUF_DEBUG
+        } };
+        auto first = node_at(&buffers, root, offset);
+        auto last = node_at(&buffers, root, offset + count);
+        auto first_node = first.node;
+        auto last_node = last.node;
+
+        auto start_split_pos = buffer_position(&buffers, first_node->piece, first.remainder);
+
+        // Simple case: the range of characters we want to delete are
+        // held directly within this node.  Remove the node, resize it
+        // then add it back.
+        if (first_node == last_node)
+        {
+            auto end_split_pos = buffer_position(&buffers, first_node->piece, last.remainder);
+            // We're going to shrink the node starting from the beginning.
+            if (first.start_offset == offset)
+            {
+                // Delete the entire node.
+                if (count == first_node->piece.length)
+                {
+                    root = root.remove(first.start_offset);
+                    return;
+                }
+                // Shrink the node.
+                auto new_piece = trim_piece_left(&buffers, first_node->piece, end_split_pos);
+                // Remove the old one and update.
+                root = root.remove(first.start_offset)
+                            .insert({ new_piece }, first.start_offset);
+                return;
+            }
+
+            // Trim the tail of this piece.
+            if (first.start_offset + first_node->piece.length == offset + count)
+            {
+                auto new_piece = trim_piece_right(&buffers, first_node->piece, start_split_pos);
+                // Remove the old one and update.
+                root = root.remove(first.start_offset)
+                            .insert({ new_piece }, first.start_offset);
+                return;
+            }
+
+            // The removed buffer is somewhere in the middle.  Trim it in both directions.
+            auto [left, right] = shrink_piece(&buffers, first_node->piece, start_split_pos, end_split_pos);
+            root = root.remove(first.start_offset)
+                        // Note: We insert right first so that the 'left' will be inserted
+                        // to the right node's left.
+                        .insert({ right }, first.start_offset)
+                        .insert({ left }, first.start_offset);
+            return;
+        }
+
+        // Traverse nodes and delete all nodes within the offset range. First we will build the
+        // partial pieces for the nodes that will eventually make up this range.
+        // There are four cases here:
+        // 1. The entire first node is deleted as well as all of the last node.
+        // 2. Part of the first node is deleted and all of the last node.
+        // 3. Part of the first node is deleted and part of the last node.
+        // 4. The entire first node is deleted and part of the last node.
+
+        auto new_first = trim_piece_right(&buffers, first_node->piece, start_split_pos);
+        if (last_node == nullptr)
+        {
+            remove_node_range(first, count);
+        }
+        else
+        {
+            auto end_split_pos = buffer_position(&buffers, last_node->piece, last.remainder);
+            auto new_last = trim_piece_left(&buffers, last_node->piece, end_split_pos);
+            remove_node_range(first, count);
+            // There's an edge case here where we delete all the nodes up to 'last' but
+            // last itself remains untouched.  The test of 'remainder' in 'last' can identify
+            // this scenario to avoid inserting a duplicate of 'last'.
+            if (last.remainder != Length{})
+            {
+                if (new_last.length != Length{})
+                {
+                    root = root.insert({ new_last }, first.start_offset);
+                }
+            }
+        }
+
+        if (new_first.length != Length{})
+        {
+            root = root.insert({ new_first }, first.start_offset);
+        }
     }
 
     // Fetches the length of the piece starting from the first line to 'index' or to the end of
@@ -831,13 +1049,6 @@ namespace PieceTree
         line_start<&Tree::accumulate_value>(&range.first, &buffers, root, line);
         line_start<&Tree::accumulate_value>(&range.last, &buffers, root, extend(line));
         return range;
-    }
-
-    RootIdentity Tree::root_identity() const
-    {
-        if (root.is_empty())
-            return nullptr;
-        return root.root_ptr();
     }
 
     OwningSnapshot Tree::owning_snap() const
@@ -1296,118 +1507,7 @@ namespace PieceTree
         {
             append_undo(root, offset);
         }
-        end_last_insert = extend(offset, txt.size());
-        ScopeGuard guard{ [&] {
-            compute_buffer_meta();
-#ifdef TEXTBUF_DEBUG
-            satisfies_rb_invariants(root);
-#endif // TEXTBUF_DEBUG
-        } };
-        if (root.is_empty())
-        {
-            auto piece = build_piece(txt);
-            root = root.insert({ piece }, CharOffset{ 0 });
-            return;
-        }
-
-        auto result = node_at(&buffers, root, offset);
-        // If the offset is beyond the buffer, just select the last node.
-        if (result.node == nullptr)
-        {
-            auto off = CharOffset{ 0 };
-            if (meta.total_content_length != Length{})
-            {
-                off = off + retract(meta.total_content_length);
-            }
-            result = node_at(&buffers, root, off);
-        }
-
-        // There are 3 cases:
-        // 1. We are inserting at the beginning of an existing node.
-        // 2. We are inserting at the end of an existing node.
-        // 3. We are inserting in the middle of the node.
-        auto [node, remainder, node_start_offset, line] = result;
-        assert(node != nullptr);
-        auto insert_pos = buffer_position(&buffers, node->piece, remainder);
-        // Case #1.
-        if (node_start_offset == offset)
-        {
-            // There's a bonus case here.  If our last insertion point was the same as this piece's
-            // last and it inserted into the mod buffer, then we can simply 'extend' this piece by
-            // the following process:
-            // 1. Fetch the previous node (if we can) and compare.
-            // 2. Build the new piece.
-            // 3. Remove the old piece.
-            // 4. Extend the old piece's length to the length of the newly created piece.
-            // 5. Re-insert the new piece.
-            if (offset != CharOffset{})
-            {
-                auto prev_node_result = node_at(&buffers, root, retract(offset));
-                if (prev_node_result.node->piece.index == BufferIndex::ModBuf
-                    and prev_node_result.node->piece.last == last_insert)
-                {
-                    auto new_piece = build_piece(txt);
-                    combine_pieces(prev_node_result, new_piece);
-                    return;
-                }
-            }
-            auto piece = build_piece(txt);
-            root = root.insert({ piece }, offset);
-            return;
-        }
-
-        const bool inside_node = offset < node_start_offset + node->piece.length;
-
-        // Case #2.
-        if (not inside_node)
-        {
-            // There's a bonus case here.  If our last insertion point was the same as this piece's
-            // last and it inserted into the mod buffer, then we can simply 'extend' this piece by
-            // the following process:
-            // 1. Build the new piece.
-            // 2. Remove the old piece.
-            // 3. Extend the old piece's length to the length of the newly created piece.
-            // 4. Re-insert the new piece.
-            if (node->piece.index == BufferIndex::ModBuf and node->piece.last == last_insert)
-            {
-                auto new_piece = build_piece(txt);
-                combine_pieces(result, new_piece);
-                return;
-            }
-            // Insert the new piece at the end.
-            auto piece = build_piece(txt);
-            root = root.insert({ piece }, offset);
-            return;
-        }
-
-        // Case #3.
-        // The basic approach here is to split the existing node into two pieces
-        // and insert the new piece in between them.
-        auto new_len_right = distance(buffers.buffer_offset(node->piece.index, insert_pos),
-                                        buffers.buffer_offset(node->piece.index, node->piece.last));
-        auto new_piece_right = node->piece;
-        new_piece_right.first = insert_pos;
-        new_piece_right.length = new_len_right;
-        new_piece_right.newline_count = line_feed_count(&buffers, node->piece.index, insert_pos, node->piece.last);
-
-        // Remove the original node tail.
-        auto new_piece_left = trim_piece_right(&buffers, node->piece, insert_pos);
-
-        auto new_piece = build_piece(txt);
-
-        // Remove the original node.
-        root = root.remove(node_start_offset);
-
-        // Insert the left.
-        root = root.insert({ new_piece_left }, node_start_offset);
-
-        // Insert the new mid.
-        node_start_offset = node_start_offset + new_piece_left.length;
-        root = root.insert({ new_piece }, node_start_offset);
-
-        // Insert remainder.
-        node_start_offset = node_start_offset + new_piece.length;
-        root = root.insert({ new_piece_right }, node_start_offset);
+        internal_insert(offset, txt);
     }
 
     void Tree::remove(CharOffset offset, Length count, SuppressHistory suppress_history)
@@ -1419,102 +1519,12 @@ namespace PieceTree
         {
             append_undo(root, offset);
         }
-        ScopeGuard guard{ [&] {
-            compute_buffer_meta();
-#ifdef TEXTBUF_DEBUG
-            satisfies_rb_invariants(root);
-#endif // TEXTBUF_DEBUG
-        } };
-        auto first = node_at(&buffers, root, offset);
-        auto last = node_at(&buffers, root, offset + count);
-        auto first_node = first.node;
-        auto last_node = last.node;
-
-        auto start_split_pos = buffer_position(&buffers, first_node->piece, first.remainder);
-
-        // Simple case: the range of characters we want to delete are
-        // held directly within this node.  Remove the node, resize it
-        // then add it back.
-        if (first_node == last_node)
-        {
-            auto end_split_pos = buffer_position(&buffers, first_node->piece, last.remainder);
-            // We're going to shrink the node starting from the beginning.
-            if (first.start_offset == offset)
-            {
-                // Delete the entire node.
-                if (count == first_node->piece.length)
-                {
-                    root = root.remove(first.start_offset);
-                    return;
-                }
-                // Shrink the node.
-                auto new_piece = trim_piece_left(&buffers, first_node->piece, end_split_pos);
-                // Remove the old one and update.
-                root = root.remove(first.start_offset)
-                            .insert({ new_piece }, first.start_offset);
-                return;
-            }
-
-            // Trim the tail of this piece.
-            if (first.start_offset + first_node->piece.length == offset + count)
-            {
-                auto new_piece = trim_piece_right(&buffers, first_node->piece, start_split_pos);
-                // Remove the old one and update.
-                root = root.remove(first.start_offset)
-                            .insert({ new_piece }, first.start_offset);
-                return;
-            }
-
-            // The removed buffer is somewhere in the middle.  Trim it in both directions.
-            auto [left, right] = shrink_piece(&buffers, first_node->piece, start_split_pos, end_split_pos);
-            root = root.remove(first.start_offset)
-                        // Note: We insert right first so that the 'left' will be inserted
-                        // to the right node's left.
-                        .insert({ right }, first.start_offset)
-                        .insert({ left }, first.start_offset);
-            return;
-        }
-
-        // Traverse nodes and delete all nodes within the offset range. First we will build the
-        // partial pieces for the nodes that will eventually make up this range.
-        // There are four cases here:
-        // 1. The entire first node is deleted as well as all of the last node.
-        // 2. Part of the first node is deleted and all of the last node.
-        // 3. Part of the first node is deleted and part of the last node.
-        // 4. The entire first node is deleted and part of the last node.
-
-        auto new_first = trim_piece_right(&buffers, first_node->piece, start_split_pos);
-        if (last_node == nullptr)
-        {
-            remove_node_range(first, count);
-        }
-        else
-        {
-            auto end_split_pos = buffer_position(&buffers, last_node->piece, last.remainder);
-            auto new_last = trim_piece_left(&buffers, last_node->piece, end_split_pos);
-            remove_node_range(first, count);
-            // There's an edge case here where we delete all the nodes up to 'last' but
-            // last itself remains untouched.  The test of 'remainder' in 'last' can identify
-            // this scenario to avoid inserting a duplicate of 'last'.
-            if (last.remainder != Length{})
-            {
-                if (new_last.length != Length{})
-                {
-                    root = root.insert({ new_last }, first.start_offset);
-                }
-            }
-        }
-
-        if (new_first.length != Length{})
-        {
-            root = root.insert({ new_first }, first.start_offset);
-        }
+        internal_remove(offset, count);
     }
 
     void Tree::compute_buffer_meta()
     {
-        meta.lf_count = tree_lf_count(root);
-        meta.total_content_length = tree_length(root);
+        ::PieceTree::compute_buffer_meta(&meta, root);
     }
 
     void Tree::append_undo(const RedBlackTree& old_root, CharOffset op_offset)
@@ -1557,6 +1567,17 @@ namespace PieceTree
         append_undo(root, offset);
     }
 
+    RedBlackTree Tree::head() const
+    {
+        return root;
+    }
+
+    void Tree::snap_to(const RedBlackTree& new_root)
+    {
+        root = new_root;
+        compute_buffer_meta();
+    }
+
 #ifdef TEXTBUF_DEBUG
     void print_piece(const Piece& piece, const Tree* tree, int level)
     {
@@ -1583,10 +1604,28 @@ namespace PieceTree
         meta{ tree->meta },
         buffers{ tree->buffers } { }
 
+    OwningSnapshot::OwningSnapshot(const Tree* tree, const RedBlackTree& dt):
+        root{ tree->root },
+        meta{ tree->meta },
+        buffers{ tree->buffers }
+    {
+        // Compute the buffer meta for 'dt'.
+        compute_buffer_meta(&meta, dt);
+    }
+
     ReferenceSnapshot::ReferenceSnapshot(const Tree* tree):
         root{ tree->root },
         meta{ tree->meta },
         buffers{ &tree->buffers } { }
+
+    ReferenceSnapshot::ReferenceSnapshot(const Tree* tree, const RedBlackTree& dt):
+        root{ dt },
+        meta{ tree->meta },
+        buffers{ &tree->buffers }
+    {
+        // Compute the buffer meta for 'dt'.
+        compute_buffer_meta(&meta, dt);
+    }
 
     TreeWalker::TreeWalker(const Tree* tree, CharOffset offset):
         buffers{ &tree->buffers },
@@ -2282,6 +2321,52 @@ void test8()
     assume_buffer(&tree, "World");
 }
 
+void test9()
+{
+    TreeBuilder builder;
+    std::string buf;
+    builder.accept("Hello, World!");
+    auto tree = builder.create();
+
+    auto initial_commit = tree.head();
+
+    tree.insert(CharOffset{ 0 }, "a", PieceTree::SuppressHistory::Yes);
+    assume_buffer(&tree, "aHello, World!");
+
+    auto r = tree.try_undo(CharOffset{ 0 });
+    assert(not r.success);
+
+    auto commit = tree.head();
+    tree.snap_to(initial_commit);
+    assume_buffer(&tree, "Hello, World!");
+
+    tree.snap_to(commit);
+    assume_buffer(&tree, "aHello, World!");
+
+    tree.remove(CharOffset{ 0 }, Length{ 8 }, PieceTree::SuppressHistory::Yes);
+    assume_buffer(&tree, "World!");
+
+    tree.snap_to(commit);
+    assume_buffer(&tree, "aHello, World!");
+
+    tree.snap_to(initial_commit);
+    assume_buffer(&tree, "Hello, World!");
+
+    // Create a new branch.
+    tree.insert(CharOffset{ 13 }, " My name is fredbuf.", PieceTree::SuppressHistory::Yes);
+    assume_buffer(&tree, "Hello, World! My name is fredbuf.");
+
+    auto branch = tree.head();
+
+    // Revert back.
+    tree.snap_to(commit);
+    assume_buffer(&tree, "aHello, World!");
+
+    // Revert back to branch.
+    tree.snap_to(branch);
+    assume_buffer(&tree, "Hello, World! My name is fredbuf.");
+}
+
 int main()
 {
     test1();
@@ -2292,4 +2377,5 @@ int main()
     test6();
     test7();
     test8();
+    test9();
 }
