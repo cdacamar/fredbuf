@@ -94,6 +94,9 @@ namespace PieceTree
         Length total_content_length = { };
     };
 
+    // Indicates whether or not line was missing a CR (e.g. only a '\n' was at the end).
+    enum class IncompleteCRLF : bool { No, Yes };
+
     class Tree
     {
     public:
@@ -120,7 +123,7 @@ namespace PieceTree
 
         // Queries.
         void get_line_content(std::string* buf, Line line) const;
-        void get_line_content_crlf(std::string* buf, Line line) const;
+        [[nodiscard]] IncompleteCRLF get_line_content_crlf(std::string* buf, Line line) const;
         char at(CharOffset offset) const;
         Line line_at(CharOffset offset) const;
         LineRange get_line_range(Line line) const;
@@ -213,7 +216,16 @@ namespace PieceTree
 
         // Queries.
         void get_line_content(std::string* buf, Line line) const;
-        void get_line_content_crlf(std::string* buf, Line line) const;
+        [[nodiscard]] IncompleteCRLF get_line_content_crlf(std::string* buf, Line line) const;
+        Line line_at(CharOffset offset) const;
+        LineRange get_line_range(Line line) const;
+        LineRange get_line_range_crlf(Line line) const;
+        LineRange get_line_range_with_newline(Line line) const;
+        bool is_empty() const
+        {
+            return meta.total_content_length == Length{};
+        }
+
         Length line_count() const
         {
             return Length{ rep(meta.lf_count) + 1 };
@@ -236,7 +248,16 @@ namespace PieceTree
 
         // Queries.
         void get_line_content(std::string* buf, Line line) const;
-        void get_line_content_crlf(std::string* buf, Line line) const;
+        [[nodiscard]] IncompleteCRLF get_line_content_crlf(std::string* buf, Line line) const;
+        Line line_at(CharOffset offset) const;
+        LineRange get_line_range(Line line) const;
+        LineRange get_line_range_crlf(Line line) const;
+        LineRange get_line_range_with_newline(Line line) const;
+        bool is_empty() const
+        {
+            return meta.total_content_length == Length{};
+        }
+
         Length line_count() const
         {
             return Length{ rep(meta.lf_count) + 1 };

@@ -13,7 +13,7 @@ namespace Editor
 
     enum class CharOffset : size_t
     {
-        Sentinel = -1
+        Sentinel = sentinel_for<CharOffset>
     };
 
     constexpr CharOffset operator+(CharOffset off, Length len)

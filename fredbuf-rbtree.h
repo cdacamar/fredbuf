@@ -18,7 +18,7 @@ namespace PieceTree
 {
     enum class BufferIndex : size_t
     {
-        ModBuf = -1
+        ModBuf = sentinel_for<BufferIndex>
     };
 
     enum class Line : size_t

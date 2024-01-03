@@ -1193,7 +1193,7 @@ namespace PieceTree
     namespace
     {
         template <typename TreeT>
-        void trim_crlf(std::string* buf, TreeT* tree, CharOffset line_offset)
+        [[nodiscard]] IncompleteCRLF trim_crlf(std::string* buf, TreeT* tree, CharOffset line_offset)
         {
             TreeWalker walker{ tree, line_offset };
             auto prev_char = '\0';
@@ -1205,58 +1205,125 @@ namespace PieceTree
                     if (prev_char == '\r')
                     {
                         buf->pop_back();
+                        return IncompleteCRLF::No;
                     }
-                    break;
+                    return IncompleteCRLF::Yes;
                 }
                 buf->push_back(c);
                 prev_char = c;
             }
+            // End of the buffer is not an incomplete CRLF.
+            return IncompleteCRLF::No;
         }
     } // namespace [anon]
 
-    void Tree::get_line_content_crlf(std::string* buf, Line line) const
+    IncompleteCRLF Tree::get_line_content_crlf(std::string* buf, Line line) const
     {
         // Reset the buffer.
         buf->clear();
         if (line == Line::IndexBeginning)
-            return;
+            return IncompleteCRLF::No;
         auto node = root;
         if (node.is_empty())
-            return;
+            return IncompleteCRLF::No;
         // Trying this new logic for now.
         CharOffset line_offset{ };
         line_start<&Tree::accumulate_value>(&line_offset, &buffers, node, line);
-        trim_crlf(buf, this, line_offset);
+        return trim_crlf(buf, this, line_offset);
     }
 
-    void OwningSnapshot::get_line_content_crlf(std::string* buf, Line line) const
+    IncompleteCRLF OwningSnapshot::get_line_content_crlf(std::string* buf, Line line) const
     {
         // Reset the buffer.
         buf->clear();
         if (line == Line::IndexBeginning)
-            return;
+            return IncompleteCRLF::No;
         auto node = root;
         if (node.is_empty())
-            return;
+            return IncompleteCRLF::No;
         // Trying this new logic for now.
         CharOffset line_offset{ };
         Tree::line_start<&Tree::accumulate_value>(&line_offset, &buffers, node, line);
-        trim_crlf(buf, this, line_offset);
+        return trim_crlf(buf, this, line_offset);
     }
 
-    void ReferenceSnapshot::get_line_content_crlf(std::string* buf, Line line) const
+    IncompleteCRLF ReferenceSnapshot::get_line_content_crlf(std::string* buf, Line line) const
     {
         // Reset the buffer.
         buf->clear();
         if (line == Line::IndexBeginning)
-            return;
+            return IncompleteCRLF::No;
         auto node = root;
         if (node.is_empty())
-            return;
+            return IncompleteCRLF::No;
         // Trying this new logic for now.
         CharOffset line_offset{ };
         Tree::line_start<&Tree::accumulate_value>(&line_offset, buffers, node, line);
-        trim_crlf(buf, this, line_offset);
+        return trim_crlf(buf, this, line_offset);
+    }
+
+    Line OwningSnapshot::line_at(CharOffset offset) const
+    {
+        if (is_empty())
+            return Line::Beginning;
+        auto result = Tree::node_at(&buffers, root, offset);
+        return result.line;
+    }
+
+    Line ReferenceSnapshot::line_at(CharOffset offset) const
+    {
+        if (is_empty())
+            return Line::Beginning;
+        auto result = Tree::node_at(buffers, root, offset);
+        return result.line;
+    }
+
+    LineRange OwningSnapshot::get_line_range(Line line) const
+    {
+        LineRange range{ };
+        Tree::line_start<&Tree::accumulate_value>(&range.first, &buffers, root, line);
+        Tree::line_start<&Tree::accumulate_value_no_lf>(&range.last, &buffers, root, extend(line));
+        return range;
+    }
+
+    LineRange ReferenceSnapshot::get_line_range(Line line) const
+    {
+        LineRange range{ };
+        Tree::line_start<&Tree::accumulate_value>(&range.first, buffers, root, line);
+        Tree::line_start<&Tree::accumulate_value_no_lf>(&range.last, buffers, root, extend(line));
+        return range;
+    }
+
+    LineRange OwningSnapshot::get_line_range_crlf(Line line) const
+    {
+        LineRange range{ };
+        Tree::line_start<&Tree::accumulate_value>(&range.first, &buffers, root, line);
+        Tree::line_end_crlf(&range.last, &buffers, root, root, extend(line));
+        return range;
+    }
+
+    LineRange ReferenceSnapshot::get_line_range_crlf(Line line) const
+    {
+        LineRange range{ };
+        Tree::line_start<&Tree::accumulate_value>(&range.first, buffers, root, line);
+        Tree::line_end_crlf(&range.last, buffers, root, root, extend(line));
+        return range;
+    }
+
+    LineRange OwningSnapshot::get_line_range_with_newline(Line line) const
+    {
+        LineRange range{ };
+        Tree::line_start<&Tree::accumulate_value>(&range.first, &buffers, root, line);
+        Tree::line_start<&Tree::accumulate_value>(&range.last, &buffers, root, extend(line));
+        return range;
+    }
+
+    LineRange ReferenceSnapshot::get_line_range_with_newline(Line line) const
+    {
+        LineRange range{ };
+        Tree::line_start<&Tree::accumulate_value>(&range.first, buffers, root, line);
+        Tree::line_start<&Tree::accumulate_value>(&range.last, buffers, root, extend(line));
+        return range;
     }
 
     LFCount Tree::line_feed_count(const BufferCollection* buffers, BufferIndex index, const BufferCursor& start, const BufferCursor& end)
@@ -1582,7 +1649,7 @@ namespace PieceTree
     void print_piece(const Piece& piece, const Tree* tree, int level)
     {
         const char* levels = "|||||||||||||||||||||||||||||||";
-        printf("%.*sidx{%lld}, first{l{%lld}, c{%lld}}, last{l{%lld}, c{%lld}}, len{%lld}, lf{%lld}\n",
+        printf("%.*sidx{%zd}, first{l{%zd}, c{%zd}}, last{l{%zd}, c{%zd}}, len{%zd}, lf{%zd}\n",
                 level, levels,
                 rep(piece.index), rep(piece.first.line), rep(piece.first.column),
                                   rep(piece.last.line), rep(piece.last.column),
@@ -1770,7 +1837,6 @@ namespace PieceTree
     void TreeWalker::fast_forward_to(CharOffset offset)
     {
         auto node = root;
-        size_t node_start_offset = 0;
         while (not node.is_empty())
         {
             if (rep(node.root().left_subtree_length) > rep(offset))
@@ -1801,7 +1867,6 @@ namespace PieceTree
                 stack.pop_back();
                 auto offset_amount = rep(node.root().left_subtree_length + node.root().piece.length);
                 offset = retract(offset, offset_amount);
-                node_start_offset += offset_amount;
                 node = node.right();
                 stack.push_back({ node });
             }
@@ -1819,7 +1884,7 @@ void print_tree(const PieceTree::RedBlackTree& root, const PieceTree::Tree* tree
     auto this_offset = node_offset + rep(root.root().left_subtree_length);
     printf("%.*sme: %p, left: %p, right: %p, color: %s\n", level, levels, root.root_ptr(), root.left().root_ptr(), root.right().root_ptr(), to_string(root.root_color()));
     print_piece(root.root().piece, tree, level);
-    printf("%.*sleft_len{%lld}, left_lf{%lld}, node_offset{%lld}\n", level, levels, rep(root.root().left_subtree_length), rep(root.root().left_subtree_lf_count), this_offset);
+    printf("%.*sleft_len{%zd}, left_lf{%zd}, node_offset{%zd}\n", level, levels, rep(root.root().left_subtree_length), rep(root.root().left_subtree_lf_count), this_offset);
     printf("\n");
     print_tree(root.left(), tree, level + 1, node_offset);
     printf("\n");
