@@ -1,1 +1,1 @@
-cl /std:c++latest /EHsc /W4 /WX /diagnostics:caret /diagnostics:color /Zi fredbuf.cpp /Fefredbuf.exe
+cl /std:c++latest /EHsc /W4 /WX /diagnostics:caret /diagnostics:color /Zi fredbuf-test.cpp /Fefredbuf-test.exe

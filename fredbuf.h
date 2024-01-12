@@ -154,6 +154,7 @@ namespace PieceTree
         ReferenceSnapshot ref_snap() const;
     private:
         friend class TreeWalker;
+        friend class ReverseTreeWalker;
         friend class OwningSnapshot;
         friend class ReferenceSnapshot;
 #ifdef TEXTBUF_DEBUG
@@ -232,6 +233,7 @@ namespace PieceTree
         }
     private:
         friend class TreeWalker;
+        friend class ReverseTreeWalker;
 
         RedBlackTree root;
         BufferMeta meta;
@@ -264,6 +266,7 @@ namespace PieceTree
         }
     private:
         friend class TreeWalker;
+        friend class ReverseTreeWalker;
 
         RedBlackTree root;
         BufferMeta meta;
@@ -322,6 +325,55 @@ namespace PieceTree
         {
             PieceTree::RedBlackTree node;
             Direction dir = Direction::Left;
+        };
+
+        const BufferCollection* buffers;
+        RedBlackTree root;
+        BufferMeta meta;
+        std::vector<StackEntry> stack;
+        CharOffset total_offset = CharOffset{ 0 };
+        const char* first_ptr = nullptr;
+        const char* last_ptr = nullptr;
+    };
+
+    class ReverseTreeWalker
+    {
+    public:
+        ReverseTreeWalker(const Tree* tree, CharOffset offset = CharOffset{ });
+        ReverseTreeWalker(const OwningSnapshot* snap, CharOffset offset = CharOffset{ });
+        ReverseTreeWalker(const ReferenceSnapshot* snap, CharOffset offset = CharOffset{ });
+        ReverseTreeWalker(const TreeWalker&) = delete;
+
+        char current();
+        char next();
+        void seek(CharOffset offset);
+        bool exhausted() const;
+        Length remaining() const;
+        CharOffset offset() const
+        {
+            return total_offset;
+        }
+
+        // For Iterator-like behavior.
+        ReverseTreeWalker& operator++()
+        {
+            return *this;
+        }
+
+        char operator*()
+        {
+            return next();
+        }
+    private:
+        void populate_ptrs();
+        void fast_forward_to(CharOffset offset);
+
+        enum class Direction { Left, Center, Right };
+
+        struct StackEntry
+        {
+            PieceTree::RedBlackTree node;
+            Direction dir = Direction::Right;
         };
 
         const BufferCollection* buffers;
